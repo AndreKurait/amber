@@ -14,6 +14,7 @@ pub enum Type {
     Int,
     Array(Box<Type>),
     Union(Vec<Type>),
+    Function(Vec<Type>, Box<Type>, bool),
     Generic,
 }
 
@@ -93,6 +94,9 @@ impl Type {
             Type::Generic => false,
             Type::Union(_) => false,
             Type::Array(inner) => inner.is_strictly_typed(),
+            Type::Function(params, returns, _) => {
+                params.iter().all(Type::is_strictly_typed) && returns.is_strictly_typed()
+            }
             _ => true,
         }
     }
@@ -131,6 +135,11 @@ impl Display for Type {
                 }
             }
             Type::Union(types) => write!(f, "{}", types.iter().map(|t| t.to_string()).join(" | ")),
+            Type::Function(params, returns, is_failable) => {
+                let params = params.iter().map(|t| t.to_string()).join(", ");
+                let question = if *is_failable { "?" } else { "" };
+                write!(f, "fun({params}): {returns}{question}")
+            }
             Type::Generic => write!(f, "Generic"),
         }
     }
@@ -200,6 +209,34 @@ fn try_parse_simple_type(meta: &mut ParserMetadata) -> Result<Type, Failure> {
                     meta.increment_index();
                     Ok(Type::Null)
                 }
+                "fun" => {
+                    let index = meta.get_index();
+                    meta.increment_index();
+                    let mut parse = || -> Result<Type, Failure> {
+                        token(meta, "(")?;
+                        let mut params = vec![];
+                        if token(meta, ")").is_err() {
+                            loop {
+                                params.push(try_parse_type(meta)?);
+                                match token(meta, ")") {
+                                    Ok(_) => break,
+                                    Err(_) => token(meta, ",")?,
+                                };
+                            }
+                        }
+                        token(meta, ":")?;
+                        let returns = try_parse_type(meta)?;
+                        let is_failable = token(meta, "?").is_ok();
+                        Ok(Type::Function(params, Box::new(returns), is_failable))
+                    };
+                    match parse() {
+                        Ok(result_type) => Ok(result_type),
+                        Err(_) => {
+                            meta.set_index(index);
+                            Err(Failure::Quiet(PositionInfo::at_eof(meta)))
+                        }
+                    }
+                }
                 "[" => {
                     let index = meta.get_index();
                     meta.increment_index();
@@ -266,6 +303,10 @@ fn try_parse_simple_type(meta: &mut ParserMetadata) -> Result<Type, Failure> {
 mod tests {
     use super::Type;
 
+    fn func(params: Vec<Type>, returns: Type, is_failable: bool) -> Type {
+        Type::Function(params, Box::new(returns), is_failable)
+    }
+
     #[test]
     fn concrete_array_is_a_subset_of_generic_array() {
         let a = Type::Array(Box::new(Type::Text));
@@ -295,5 +336,37 @@ mod tests {
         let a = Type::Array(Box::new(Type::Generic));
 
         assert!(!a.is_subset_of(&a));
+    }
+
+    #[test]
+    fn function_type_displays_like_its_signature() {
+        let f = func(vec![Type::Int, Type::Int], Type::Int, false);
+        assert_eq!(f.to_string(), "fun(Int, Int): Int");
+
+        let g = func(vec![Type::Text], Type::Null, false);
+        assert_eq!(g.to_string(), "fun(Text): Null");
+
+        let h = func(vec![], Type::Int, true);
+        assert_eq!(h.to_string(), "fun(): Int?");
+    }
+
+    #[test]
+    fn function_type_strictness_follows_params_and_return() {
+        assert!(func(vec![Type::Int], Type::Text, false).is_strictly_typed());
+        assert!(!func(vec![Type::Generic], Type::Text, false).is_strictly_typed());
+        assert!(!func(vec![Type::Int], Type::Generic, false).is_strictly_typed());
+    }
+
+    #[test]
+    fn function_type_relates_invariantly() {
+        let a = func(vec![Type::Int], Type::Int, false);
+        let b = func(vec![Type::Int], Type::Int, false);
+        let c = func(vec![Type::Text], Type::Int, false);
+        let failable = func(vec![Type::Int], Type::Int, true);
+        assert!(a.is_allowed_in(&b));
+        assert!(!a.is_allowed_in(&c));
+        assert!(!a.is_allowed_in(&failable));
+        assert!(a.is_allowed_in(&Type::Generic));
+        assert!(Type::Generic.is_allowed_in(&a));
     }
 }

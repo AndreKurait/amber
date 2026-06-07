@@ -1,0 +1,7 @@
+// Output
+// ok
+
+fun apply(f: fun(Int): Int): fun(Int): Int {
+    return f
+}
+echo("ok")

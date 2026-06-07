@@ -1,0 +1,6 @@
+// Output
+// Expected a data type
+
+fun apply(f: fun(Int)): Int {
+    return 0
+}
