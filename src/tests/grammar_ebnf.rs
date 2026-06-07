@@ -206,7 +206,12 @@ fn grammar_contains_all_terminal_definitions() {
     assert!(g.contains("LETTER = 'A'..'Z' | 'a'..'z' ;"));
     assert!(g.contains("DIGIT = '0'..'9' ;"));
     assert!(g.contains("TYPE = SIMPLE_TYPE, { '|', SIMPLE_TYPE } ;"));
-    assert!(g.contains("SIMPLE_TYPE = 'Text' | 'Num' | 'Bool' | 'Null' | 'Int' | '[', TYPE, ']' ;"));
+    assert!(g.contains(
+        "SIMPLE_TYPE = 'Text' | 'Num' | 'Bool' | 'Null' | 'Int' | '[', TYPE, ']' | FUNCTION_TYPE ;"
+    ));
+    assert!(g.contains(
+        "FUNCTION_TYPE = KEYWORD_FUN, '(', [ TYPE, { ',', TYPE } ], ')', ':', TYPE, [ '?' ] ;"
+    ));
 }
 
 #[test]

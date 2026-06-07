@@ -1,0 +1,11 @@
+// Output
+// ok
+
+// A `fun(...)` type annotation (#1110) must parse + typecheck in both parameter
+// and return position. Returning `f` also exercises that a callable type is
+// allowed-in itself. (Lambda values + codegen are later phases; this is the
+// type-annotation surface.)
+fun apply(f: fun(Int): Int): fun(Int): Int {
+    return f
+}
+echo("ok")

@@ -1,0 +1,8 @@
+// Output
+// Expected a data type
+
+// A `fun(...)` type (#1110) requires a return type after `:`; a bare `fun(Int)`
+// with no return is rejected.
+fun apply(f: fun(Int)): Int {
+    return 0
+}

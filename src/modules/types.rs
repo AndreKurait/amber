@@ -14,6 +14,10 @@ pub enum Type {
     Int,
     Array(Box<Type>),
     Union(Vec<Type>),
+    /// A callable value: `fun(params): returns`. The bool is whether the callable
+    /// is failable (`fun(...): T?`). This is the type half of first-class functions
+    /// / closures (see #1110); lambda expressions + codegen land in later phases.
+    Function(Vec<Type>, Box<Type>, bool),
     Generic,
 }
 
@@ -35,6 +39,11 @@ impl Type {
             },
             (Type::Union(types), other) => types.iter().all(|t| t.is_allowed_in(other)),
             (other, Type::Union(types)) => types.iter().any(|t| other.is_allowed_in(t)),
+            // Function types are INVARIANT for now (see #1110): a callable is only
+            // compatible with an identical signature, handled by `is_subseteq_of`'s
+            // `==` check — there is no proper-subset widening (unlike `[Generic]` ->
+            // `[Int]`). Explicit arm so a future variance change has an obvious home.
+            (Type::Function(..), Type::Function(..)) => false,
             _ => false,
         }
     }
@@ -93,6 +102,11 @@ impl Type {
             Type::Generic => false,
             Type::Union(_) => false,
             Type::Array(inner) => inner.is_strictly_typed(),
+            // A callable is strict only when every parameter and its return are strict,
+            // so an un-inferable lambda parameter type is rejected like an untyped array.
+            Type::Function(params, returns, _) => {
+                params.iter().all(Type::is_strictly_typed) && returns.is_strictly_typed()
+            }
             _ => true,
         }
     }
@@ -109,7 +123,9 @@ impl Type {
             (Type::Array(inner_a), Type::Array(inner_b)) => inner_a.can_intersect(inner_b),
             // Generic can be anything
             (Type::Generic, _) | (_, Type::Generic) => true,
-            // Different primitive types never intersect
+            // Different primitive types never intersect. Function types intersect
+            // only when identical (caught by the `a == b` arm above) — invariant for
+            // now, see #1110.
             _ => false,
         }
     }
@@ -131,6 +147,11 @@ impl Display for Type {
                 }
             }
             Type::Union(types) => write!(f, "{}", types.iter().map(|t| t.to_string()).join(" | ")),
+            Type::Function(params, returns, is_failable) => {
+                let params = params.iter().map(|t| t.to_string()).join(", ");
+                let question = if *is_failable { "?" } else { "" };
+                write!(f, "fun({params}): {returns}{question}")
+            }
             Type::Generic => write!(f, "Generic"),
         }
     }
@@ -200,6 +221,40 @@ fn try_parse_simple_type(meta: &mut ParserMetadata) -> Result<Type, Failure> {
                     meta.increment_index();
                     Ok(Type::Null)
                 }
+                // Function (callable) type: `fun(T1, T2, ...): R` or `fun(...): R?`.
+                // Mirrors the function-declaration signature shape so it reads the
+                // same in type position. See #1110.
+                "fun" => {
+                    // Snapshot + restore on failure, exactly like the `[` arm below:
+                    // try_parse_type's backtracking callers (e.g. the array-literal
+                    // parser) require the index to be left untouched on a quiet failure.
+                    let index = meta.get_index();
+                    meta.increment_index();
+                    let mut parse = || -> Result<Type, Failure> {
+                        token(meta, "(")?;
+                        let mut params = vec![];
+                        if token(meta, ")").is_err() {
+                            loop {
+                                params.push(try_parse_type(meta)?);
+                                match token(meta, ")") {
+                                    Ok(_) => break,
+                                    Err(_) => token(meta, ",")?,
+                                };
+                            }
+                        }
+                        token(meta, ":")?;
+                        let returns = try_parse_type(meta)?;
+                        let is_failable = token(meta, "?").is_ok();
+                        Ok(Type::Function(params, Box::new(returns), is_failable))
+                    };
+                    match parse() {
+                        Ok(result_type) => Ok(result_type),
+                        Err(_) => {
+                            meta.set_index(index);
+                            Err(Failure::Quiet(PositionInfo::at_eof(meta)))
+                        }
+                    }
+                }
                 "[" => {
                     let index = meta.get_index();
                     meta.increment_index();
@@ -266,6 +321,10 @@ fn try_parse_simple_type(meta: &mut ParserMetadata) -> Result<Type, Failure> {
 mod tests {
     use super::Type;
 
+    fn func(params: Vec<Type>, returns: Type, is_failable: bool) -> Type {
+        Type::Function(params, Box::new(returns), is_failable)
+    }
+
     #[test]
     fn concrete_array_is_a_subset_of_generic_array() {
         let a = Type::Array(Box::new(Type::Text));
@@ -295,5 +354,46 @@ mod tests {
         let a = Type::Array(Box::new(Type::Generic));
 
         assert!(!a.is_subset_of(&a));
+    }
+
+    #[test]
+    fn function_type_displays_like_its_signature() {
+        let f = func(vec![Type::Int, Type::Int], Type::Int, false);
+        assert_eq!(f.to_string(), "fun(Int, Int): Int");
+
+        let g = func(vec![Type::Text], Type::Null, false);
+        assert_eq!(g.to_string(), "fun(Text): Null");
+
+        let h = func(vec![], Type::Int, true);
+        assert_eq!(h.to_string(), "fun(): Int?");
+    }
+
+    #[test]
+    fn function_type_strictness_follows_params_and_return() {
+        // concrete params + return -> strict
+        assert!(func(vec![Type::Int], Type::Text, false).is_strictly_typed());
+        // an un-inferable (Generic) parameter -> not strict
+        assert!(!func(vec![Type::Generic], Type::Text, false).is_strictly_typed());
+        // an un-inferable return -> not strict
+        assert!(!func(vec![Type::Int], Type::Generic, false).is_strictly_typed());
+    }
+
+    #[test]
+    fn function_type_relates_invariantly() {
+        let a = func(vec![Type::Int], Type::Int, false);
+        let b = func(vec![Type::Int], Type::Int, false);
+        let c = func(vec![Type::Text], Type::Int, false);
+        // identical signatures are interchangeable ...
+        assert!(a.is_allowed_in(&b));
+        // ... differing signatures are not (invariant for now; see #1110)
+        assert!(!a.is_allowed_in(&c));
+        // failability is part of a callable's identity: fun(Int):Int and
+        // fun(Int):Int? are NOT interchangeable.
+        let failable = func(vec![Type::Int], Type::Int, true);
+        assert!(!a.is_allowed_in(&failable));
+        // Generic interplay both directions (lambda inference relies on this):
+        // a concrete callable fits an un-annotated slot, and Generic fits a callable.
+        assert!(a.is_allowed_in(&Type::Generic));
+        assert!(Type::Generic.is_allowed_in(&a));
     }
 }
