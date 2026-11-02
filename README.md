@@ -1,3 +1,5 @@
+> **Archived personal experiment — November 2026. The unfinished first-class-functions work is parked and preserved in [PR #2](https://github.com/AndreKurait/amber/pull/2) and its `closures-phase1-types` branch, including the design discussion. Active language development continues in [amber-lang/amber](https://github.com/amber-lang/amber).**
+
 <div align="center">
     <img src="assets/amber.png" alt="amber logo" width="250" />
 </div>
